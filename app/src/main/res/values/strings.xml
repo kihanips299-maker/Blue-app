@@ -1,0 +1,18 @@
+<resources>
+    <string name="app_name">AmpSync</string>
+    <string name="nav_party_deck">Party Deck</string>
+    <string name="nav_speakers">Speakers</string>
+    <string name="nav_discover">Discover</string>
+    <string name="nav_presets">Studio</string>
+    <string name="status_sync_locked">SYNC LOCKED</string>
+    <string name="status_single_sink">SINGLE SINK</string>
+    <string name="status_standby">STANDBY</string>
+    <string name="action_pick_audio">Load Track</string>
+    <string name="action_scan_speakers">Scan Nearby</string>
+    <string name="action_bt_settings">Bluetooth Settings</string>
+    <string name="action_grant_bt">Enable Bluetooth Access</string>
+    <string name="action_save_preset">Save Room Preset</string>
+    <string name="bt_permission_rationale">AmpSync needs Bluetooth Connect and Scan permissions to detect your paired speakers, read codec transport status, and discover nearby party speakers.</string>
+    <string name="party_channel_name">AmpSync Party Playback</string>
+    <string name="party_channel_desc">Keeps synchronized multi-speaker audio running reliably during house parties.</string>
+</resources>

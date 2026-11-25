@@ -1,0 +1,6 @@
+{
+  "name": "AmpSync",
+  "description": "Synchronized multi-room Bluetooth speaker audio controller for house parties with low-latency streaming and per-speaker volume mixing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
