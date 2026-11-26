@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.OpenableColumns
 import com.example.model.PartyTrack
@@ -141,6 +142,47 @@ class PartySynthEngine {
                     right = kick + rhodesR + shaker * 1.2
                 }
 
+                SynthGroovePreset.ELECTRIC_EUPHORIA -> {
+                    val t = s / sr
+                    // Punchy gated synthwave kick + snare on 2 and 4
+                    val kick = sin(2.0 * PI * (54.0 + 120.0 * exp(-beatTime * 40.0)) * beatTime) * exp(-beatTime * 15.0) * 0.56
+                    val isSnare = (beatInBar >= 1.0 && beatInBar < 1.28) || (beatInBar >= 3.0 && beatInBar < 3.28)
+                    val snare = if (isSnare) nextWhiteNoise() * exp(-beatTime * 18.0) * 0.22 else 0.0
+
+                    // Driving 16th-note octave synth bass
+                    val arpBass = doubleArrayOf(110.0, 220.0, 110.0, 220.0, 130.81, 261.63, 130.81, 261.63, 98.0, 196.0, 98.0, 196.0, 146.83, 293.66, 130.81, 196.0)
+                    val bf = arpBass[step16]
+                    val bassEnv = exp(-stepTime * 9.5)
+                    val bass = tanh(sin(2.0 * PI * bf * t) * 1.4) * bassEnv * 0.30
+
+                    // Shimmering wide synthwave lead
+                    val leadNotes = doubleArrayOf(440.0, 523.25, 659.25, 587.33, 523.25, 659.25, 783.99, 659.25)
+                    val lf = leadNotes[step16 % leadNotes.size]
+                    val leadL = sin(2.0 * PI * lf * t) * exp(-stepTime * 8.0) * 0.16
+                    val leadR = sin(2.0 * PI * (lf * 1.004) * t) * exp(-stepTime * 8.0) * 0.16
+
+                    left = kick + snare + bass + leadL
+                    right = kick + snare + bass + leadR
+                }
+
+                SynthGroovePreset.ROOFTOP_GROOVE -> {
+                    val t = s / sr
+                    // Syncopated afrobeat kick & rim percussion
+                    val kickGate = if (step16 == 0 || step16 == 3 || step16 == 6 || step16 == 8 || step16 == 11 || step16 == 14) 1.0 else 0.0
+                    val kick = sin(2.0 * PI * (56.0 + 95.0 * exp(-stepTime * 36.0)) * stepTime) * exp(-stepTime * 14.0) * kickGate * 0.52
+                    val rimGate = if (step16 == 2 || step16 == 5 || step16 == 10 || step16 == 13) 1.0 else 0.0
+                    val rim = sin(2.0 * PI * 880.0 * stepTime) * exp(-stepTime * 48.0) * rimGate * 0.20
+
+                    // Warm marimba-like chord bounce
+                    val notes = doubleArrayOf(293.66, 349.23, 440.0, 523.25, 440.0, 349.23, 392.0, 523.25)
+                    val mf = notes[step16 % notes.size]
+                    val marimba = (sin(2.0 * PI * mf * t) + 0.35 * sin(2.0 * PI * mf * 2.0 * t)) * exp(-stepTime * 12.0) * 0.24
+                    val subBass = sin(2.0 * PI * (mf * 0.25) * t) * exp(-beatTime * 6.0) * 0.26
+
+                    left = kick + rim * 0.8 + marimba * 1.1 + subBass
+                    right = kick + rim * 1.2 + marimba * 0.9 + subBass
+                }
+
                 SynthGroovePreset.CALIBRATION_CLICK -> {
                     // Sharp 1kHz / 2kHz dual transient impulse every beat (500ms at 120 BPM)
                     val clickEnv = exp(-beatTime * 90.0)
@@ -166,11 +208,18 @@ class PartySynthEngine {
     }
 }
 
+enum class DecodeBlockResult {
+    OK,
+    END_OF_TRACK,
+    ERROR
+}
+
 /**
  * Decodes user-selected local audio files (MP3, AAC, WAV, FLAC, OGG) into 44.1kHz stereo PCM
- * using Android's MediaExtractor + MediaCodec with automatic resampling & looping.
+ * using Android's MediaExtractor + MediaCodec with automatic resampling, metadata lookup, & queue completion.
  */
 class LocalAudioDecoder(private val context: Context) {
+    private val decoderLock = Any()
     private var extractor: MediaExtractor? = null
     private var codec: MediaCodec? = null
     private var inputDone = false
@@ -182,65 +231,121 @@ class LocalAudioDecoder(private val context: Context) {
     private var pendingShorts = ShortArray(0)
     private var pendingOffset = 0
 
-    fun load(uri: Uri): PartyTrack? {
-        release()
+    fun extractTrackMetadata(uri: Uri): PartyTrack? {
         return runCatching {
-            val ext = MediaExtractor()
-            ext.setDataSource(context, uri, null)
-            var audioTrackIndex = -1
-            var trackFormat: MediaFormat? = null
-            for (i in 0 until ext.trackCount) {
-                val fmt = ext.getTrackFormat(i)
-                val mime = fmt.getString(MediaFormat.KEY_MIME) ?: continue
-                if (mime.startsWith("audio/")) {
-                    audioTrackIndex = i
-                    trackFormat = fmt
-                    break
-                }
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(context, uri)
+                val rawTitle = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)?.trim()
+                val rawArtist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)?.trim()
+                val rawAlbum = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)?.trim()
+                val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    ?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
+
+                val fallbackName = (queryDisplayName(uri) ?: uri.lastPathSegment ?: "Local Audio Track")
+                    .substringBeforeLast('.')
+                val title = rawTitle?.takeIf { it.isNotBlank() } ?: fallbackName
+                val artist = rawArtist?.takeIf { it.isNotBlank() } ?: "Local Audio"
+                val album = rawAlbum?.takeIf { it.isNotBlank() } ?: "Device Library"
+
+                PartyTrack(
+                    id = "local_${uri.toString().hashCode()}",
+                    title = title,
+                    artist = artist,
+                    album = album,
+                    bpm = 120,
+                    durationMs = durationMs,
+                    sourceType = TrackSourceType.LOCAL_FILE,
+                    uriString = uri.toString()
+                )
+            } finally {
+                runCatching { retriever.release() }
             }
-            if (audioTrackIndex < 0 || trackFormat == null) {
-                ext.release()
-                return null
-            }
-
-            ext.selectTrack(audioTrackIndex)
-            val mime = trackFormat.getString(MediaFormat.KEY_MIME)!!
-            sourceSampleRate = trackFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-            sourceChannels = trackFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-            durationUs = if (trackFormat.containsKey(MediaFormat.KEY_DURATION)) {
-                trackFormat.getLong(MediaFormat.KEY_DURATION)
-            } else {
-                0L
-            }
-
-            val mediaCodec = MediaCodec.createDecoderByType(mime)
-            mediaCodec.configure(trackFormat, null, null, 0)
-            mediaCodec.start()
-
-            extractor = ext
-            codec = mediaCodec
-            inputDone = false
-            outputDone = false
-            pendingShorts = ShortArray(0)
-            pendingOffset = 0
-            currentPositionUs = 0L
-
-            val title = queryDisplayName(uri) ?: uri.lastPathSegment ?: "Local Audio Track"
-            PartyTrack(
-                id = "local_${uri.toString().hashCode()}",
-                title = title.substringBeforeLast('.'),
-                artist = "Local Audio • ${sourceSampleRate / 1000}kHz",
-                bpm = 120,
-                durationMs = durationUs / 1000L,
-                sourceType = TrackSourceType.LOCAL_FILE,
-                uriString = uri.toString()
-            )
         }.getOrNull()
     }
 
-    fun getPositionMs(): Long = currentPositionUs / 1000L
+    fun loadAlbumArtBytes(uri: Uri): ByteArray? {
+        return runCatching {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(context, uri)
+                retriever.embeddedPicture
+            } finally {
+                runCatching { retriever.release() }
+            }
+        }.getOrNull()
+    }
+
+    fun load(uri: Uri): PartyTrack? {
+        val meta = extractTrackMetadata(uri)
+        synchronized(decoderLock) {
+            releaseLocked()
+            return runCatching {
+                val ext = MediaExtractor()
+                ext.setDataSource(context, uri, null)
+                var audioTrackIndex = -1
+                var trackFormat: MediaFormat? = null
+                for (i in 0 until ext.trackCount) {
+                    val fmt = ext.getTrackFormat(i)
+                    val mime = fmt.getString(MediaFormat.KEY_MIME) ?: continue
+                    if (mime.startsWith("audio/")) {
+                        audioTrackIndex = i
+                        trackFormat = fmt
+                        break
+                    }
+                }
+                if (audioTrackIndex < 0 || trackFormat == null) {
+                    ext.release()
+                    return null
+                }
+
+                ext.selectTrack(audioTrackIndex)
+                val mime = trackFormat.getString(MediaFormat.KEY_MIME)!!
+                sourceSampleRate = trackFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                sourceChannels = trackFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                durationUs = if (trackFormat.containsKey(MediaFormat.KEY_DURATION)) {
+                    trackFormat.getLong(MediaFormat.KEY_DURATION)
+                } else {
+                    (meta?.durationMs ?: 0L) * 1000L
+                }
+
+                val mediaCodec = MediaCodec.createDecoderByType(mime)
+                mediaCodec.configure(trackFormat, null, null, 0)
+                mediaCodec.start()
+
+                extractor = ext
+                codec = mediaCodec
+                inputDone = false
+                outputDone = false
+                pendingShorts = ShortArray(0)
+                pendingOffset = 0
+                currentPositionUs = 0L
+
+                val fallbackName = (queryDisplayName(uri) ?: uri.lastPathSegment ?: "Local Audio Track")
+                    .substringBeforeLast('.')
+                PartyTrack(
+                    id = "local_${uri.toString().hashCode()}",
+                    title = meta?.title ?: fallbackName,
+                    artist = meta?.artist ?: "Local Audio • ${sourceSampleRate / 1000}kHz",
+                    album = meta?.album ?: "Device Library",
+                    bpm = 120,
+                    durationMs = (durationUs / 1000L).coerceAtLeast(meta?.durationMs ?: 0L),
+                    sourceType = TrackSourceType.LOCAL_FILE,
+                    uriString = uri.toString()
+                )
+            }.getOrNull()
+        }
+    }
+
+    fun getPositionMs(): Long = synchronized(decoderLock) { currentPositionUs / 1000L }
 
     fun seekToMs(positionMs: Long) {
+        synchronized(decoderLock) {
+            seekLocked(positionMs)
+        }
+    }
+
+    private fun seekLocked(positionMs: Long) {
         val ext = extractor ?: return
         val mc = codec ?: return
         val targetUs = (positionMs * 1000L).coerceAtLeast(0L)
@@ -255,85 +360,99 @@ class LocalAudioDecoder(private val context: Context) {
         }
     }
 
-    fun readStereoBlock(outStereoPcm: ShortArray, frames: Int = AudioConstants.FRAMES_PER_BLOCK): Boolean {
-        val mc = codec ?: return false
-        val ext = extractor ?: return false
-        val neededShorts = frames * 2
-        var written = 0
+    fun readStereoBlock(
+        outStereoPcm: ShortArray,
+        frames: Int = AudioConstants.FRAMES_PER_BLOCK,
+        loopOnEnd: Boolean = false
+    ): DecodeBlockResult {
+        synchronized(decoderLock) {
+            val mc = codec ?: return DecodeBlockResult.ERROR
+            val ext = extractor ?: return DecodeBlockResult.ERROR
+            val neededShorts = frames * 2
+            var written = 0
 
-        while (written < neededShorts) {
-            if (pendingOffset < pendingShorts.size) {
-                val toCopy = minOf(neededShorts - written, pendingShorts.size - pendingOffset)
-                System.arraycopy(pendingShorts, pendingOffset, outStereoPcm, written, toCopy)
-                pendingOffset += toCopy
-                written += toCopy
-                continue
-            }
+            while (written < neededShorts) {
+                if (pendingOffset < pendingShorts.size) {
+                    val toCopy = minOf(neededShorts - written, pendingShorts.size - pendingOffset)
+                    System.arraycopy(pendingShorts, pendingOffset, outStereoPcm, written, toCopy)
+                    pendingOffset += toCopy
+                    written += toCopy
+                    continue
+                }
 
-            if (outputDone) {
-                // Seamless party loop back to start
-                seekToMs(0L)
-                if (outputDone) break
-            }
+                if (outputDone) {
+                    if (loopOnEnd) {
+                        seekLocked(0L)
+                        if (outputDone) break
+                    } else {
+                        if (written < neededShorts) {
+                            outStereoPcm.fill(0, written, neededShorts)
+                        }
+                        return DecodeBlockResult.END_OF_TRACK
+                    }
+                }
 
-            if (!inputDone) {
-                val inIdx = mc.dequeueInputBuffer(2000L)
-                if (inIdx >= 0) {
-                    val buf = mc.getInputBuffer(inIdx)
-                    if (buf != null) {
-                        val sampleSize = ext.readSampleData(buf, 0)
-                        if (sampleSize < 0) {
-                            mc.queueInputBuffer(inIdx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                            inputDone = true
-                        } else {
-                            val pts = ext.sampleTime
-                            mc.queueInputBuffer(inIdx, 0, sampleSize, pts, 0)
-                            ext.advance()
+                if (!inputDone) {
+                    val inIdx = mc.dequeueInputBuffer(2000L)
+                    if (inIdx >= 0) {
+                        val buf = mc.getInputBuffer(inIdx)
+                        if (buf != null) {
+                            val sampleSize = ext.readSampleData(buf, 0)
+                            if (sampleSize < 0) {
+                                mc.queueInputBuffer(inIdx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                inputDone = true
+                            } else {
+                                val pts = ext.sampleTime
+                                mc.queueInputBuffer(inIdx, 0, sampleSize, pts, 0)
+                                ext.advance()
+                            }
+                        }
+                    }
+                }
+
+                val info = MediaCodec.BufferInfo()
+                val outIdx = mc.dequeueOutputBuffer(info, 2000L)
+                when {
+                    outIdx >= 0 -> {
+                        val outBuf = mc.getOutputBuffer(outIdx)
+                        if (outBuf != null && info.size > 0) {
+                            outBuf.position(info.offset)
+                            outBuf.limit(info.offset + info.size)
+                            outBuf.order(ByteOrder.LITTLE_ENDIAN)
+                            val shortBuf = outBuf.asShortBuffer()
+                            val raw = ShortArray(shortBuf.remaining())
+                            shortBuf.get(raw)
+                            currentPositionUs = info.presentationTimeUs
+                            pendingShorts = normalizeTo44kStereo(raw, sourceChannels, sourceSampleRate)
+                            pendingOffset = 0
+                        }
+                        mc.releaseOutputBuffer(outIdx, false)
+                        if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                            outputDone = true
+                        }
+                    }
+                    outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                        val fmt = mc.outputFormat
+                        if (fmt.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+                            sourceSampleRate = fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                        }
+                        if (fmt.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+                            sourceChannels = fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                        }
+                    }
+                    outIdx == MediaCodec.INFO_TRY_AGAIN_LATER -> {
+                        if (inputDone && pendingOffset >= pendingShorts.size) {
+                            outputDone = true
                         }
                     }
                 }
             }
 
-            val info = MediaCodec.BufferInfo()
-            val outIdx = mc.dequeueOutputBuffer(info, 2000L)
-            when {
-                outIdx >= 0 -> {
-                    val outBuf = mc.getOutputBuffer(outIdx)
-                    if (outBuf != null && info.size > 0) {
-                        outBuf.position(info.offset)
-                        outBuf.limit(info.offset + info.size)
-                        outBuf.order(ByteOrder.LITTLE_ENDIAN)
-                        val shortBuf = outBuf.asShortBuffer()
-                        val raw = ShortArray(shortBuf.remaining())
-                        shortBuf.get(raw)
-                        currentPositionUs = info.presentationTimeUs
-                        pendingShorts = normalizeTo44kStereo(raw, sourceChannels, sourceSampleRate)
-                        pendingOffset = 0
-                    }
-                    mc.releaseOutputBuffer(outIdx, false)
-                    if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                        outputDone = true
-                    }
-                }
-                outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                    val fmt = mc.outputFormat
-                    if (fmt.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
-                        sourceSampleRate = fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-                    }
-                    if (fmt.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
-                        sourceChannels = fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-                    }
-                }
-                outIdx == MediaCodec.INFO_TRY_AGAIN_LATER -> {
-                    if (inputDone) break
-                }
+            if (written < neededShorts) {
+                outStereoPcm.fill(0, written, neededShorts)
             }
+            return DecodeBlockResult.OK
         }
-
-        if (written < neededShorts) {
-            outStereoPcm.fill(0, written, neededShorts)
-        }
-        return true
     }
 
     private fun normalizeTo44kStereo(raw: ShortArray, channels: Int, sampleRate: Int): ShortArray {
@@ -390,6 +509,12 @@ class LocalAudioDecoder(private val context: Context) {
     }
 
     fun release() {
+        synchronized(decoderLock) {
+            releaseLocked()
+        }
+    }
+
+    private fun releaseLocked() {
         runCatching { codec?.stop() }
         runCatching { codec?.release() }
         runCatching { extractor?.release() }

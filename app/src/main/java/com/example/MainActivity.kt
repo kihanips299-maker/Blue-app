@@ -36,10 +36,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BluetoothSearching
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.SpeakerGroup
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.BluetoothSearching
 import androidx.compose.material.icons.outlined.GraphicEq
+import androidx.compose.material.icons.outlined.LibraryMusic
 import androidx.compose.material.icons.outlined.SpeakerGroup
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.Icon
@@ -76,6 +78,8 @@ import androidx.navigation.compose.rememberNavController
 import com.example.ui.AmpSyncViewModel
 import com.example.ui.components.SyncStatusPill
 import com.example.ui.screens.BluetoothDiscoveryScreen
+import com.example.ui.screens.MiniMusicPlayerBar
+import com.example.ui.screens.MusicPlayerScreen
 import com.example.ui.screens.PartyDeckScreen
 import com.example.ui.screens.SpeakersSyncScreen
 import com.example.ui.screens.StudioPresetsScreen
@@ -89,6 +93,7 @@ import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 
 const val ROUTE_PARTY_DECK = "party_deck"
+const val ROUTE_MUSIC_PLAYER = "music_player"
 const val ROUTE_SPEAKERS_SYNC = "speakers_sync"
 const val ROUTE_DISCOVERY = "bluetooth_discovery"
 const val ROUTE_STUDIO_PRESETS = "studio_presets"
@@ -108,6 +113,13 @@ private val navDestinations = listOf(
         selectedIcon = Icons.Filled.GraphicEq,
         unselectedIcon = Icons.Outlined.GraphicEq,
         testTag = "nav_party_deck"
+    ),
+    NavDestinationItem(
+        route = ROUTE_MUSIC_PLAYER,
+        labelRes = R.string.nav_player,
+        selectedIcon = Icons.Filled.LibraryMusic,
+        unselectedIcon = Icons.Outlined.LibraryMusic,
+        testTag = "nav_player"
     ),
     NavDestinationItem(
         route = ROUTE_SPEAKERS_SYNC,
@@ -156,9 +168,11 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun AmpSyncApp(viewModel: AmpSyncViewModel = viewModel()) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val albumArtBytes by viewModel.currentAlbumArt.collectAsStateWithLifecycle()
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = backStackEntry?.destination
+    val currentRoute = currentDestination?.route
 
     val btPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -171,9 +185,11 @@ fun AmpSyncApp(viewModel: AmpSyncViewModel = viewModel()) {
     ) { /* playback works even if notifications are declined */ }
 
     val audioPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        uri?.let { viewModel.loadLocalAudioUri(it) }
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            viewModel.loadLocalAudioUris(uris)
+        }
     }
 
     val requestBluetoothPermissions: () -> Unit = {
@@ -226,34 +242,50 @@ fun AmpSyncApp(viewModel: AmpSyncViewModel = viewModel()) {
                 )
             },
             bottomBar = {
-                if (!useRail) {
-                    NavigationBar(
-                        containerColor = SurfaceDark,
-                        contentColor = TextPrimary,
-                        windowInsets = WindowInsets.navigationBars
-                    ) {
-                        navDestinations.forEach { dest ->
-                            val selected = currentDestination?.hierarchy?.any { it.route == dest.route } == true
-                            val label = stringResource(dest.labelRes)
-                            NavigationBarItem(
-                                selected = selected,
-                                onClick = { navigateToRoute(dest.route) },
-                                icon = {
-                                    Icon(
-                                        imageVector = if (selected) dest.selectedIcon else dest.unselectedIcon,
-                                        contentDescription = label
-                                    )
-                                },
-                                label = { Text(label) },
-                                colors = NavigationBarItemDefaults.colors(
-                                    selectedIconColor = ObsidianBg,
-                                    selectedTextColor = ElectricCyan,
-                                    indicatorColor = ElectricCyan,
-                                    unselectedIconColor = TextSecondary,
-                                    unselectedTextColor = TextSecondary
-                                ),
-                                modifier = Modifier.testTag(dest.testTag)
-                            )
+                val showMiniPlayer = currentRoute != ROUTE_MUSIC_PLAYER && currentRoute != ROUTE_PARTY_DECK
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    AnimatedVisibility(visible = showMiniPlayer) {
+                        MiniMusicPlayerBar(
+                            state = state,
+                            onTogglePlayPause = handlePlayPause,
+                            onNextTrack = viewModel::nextTrack,
+                            onOpenPlayer = { navigateToRoute(ROUTE_MUSIC_PLAYER) },
+                            modifier = if (useRail) {
+                                Modifier.windowInsetsPadding(WindowInsets.navigationBars)
+                            } else {
+                                Modifier
+                            }
+                        )
+                    }
+                    if (!useRail) {
+                        NavigationBar(
+                            containerColor = SurfaceDark,
+                            contentColor = TextPrimary,
+                            windowInsets = WindowInsets.navigationBars
+                        ) {
+                            navDestinations.forEach { dest ->
+                                val selected = currentDestination?.hierarchy?.any { it.route == dest.route } == true
+                                val label = stringResource(dest.labelRes)
+                                NavigationBarItem(
+                                    selected = selected,
+                                    onClick = { navigateToRoute(dest.route) },
+                                    icon = {
+                                        Icon(
+                                            imageVector = if (selected) dest.selectedIcon else dest.unselectedIcon,
+                                            contentDescription = label
+                                        )
+                                    },
+                                    label = { Text(label, maxLines = 1) },
+                                    colors = NavigationBarItemDefaults.colors(
+                                        selectedIconColor = ObsidianBg,
+                                        selectedTextColor = ElectricCyan,
+                                        indicatorColor = ElectricCyan,
+                                        unselectedIconColor = TextSecondary,
+                                        unselectedTextColor = TextSecondary
+                                    ),
+                                    modifier = Modifier.testTag(dest.testTag)
+                                )
+                            }
                         }
                     }
                 }
@@ -327,6 +359,26 @@ fun AmpSyncApp(viewModel: AmpSyncViewModel = viewModel()) {
                                 onSelectEqualizerPreset = viewModel::setEqualizerPreset,
                                 onNavigateToSpeakers = { navigateToRoute(ROUTE_SPEAKERS_SYNC) },
                                 onNavigateToStudio = { navigateToRoute(ROUTE_STUDIO_PRESETS) }
+                            )
+                        }
+
+                        composable(ROUTE_MUSIC_PLAYER) {
+                            MusicPlayerScreen(
+                                state = state,
+                                albumArtBytes = albumArtBytes,
+                                onTogglePlayPause = handlePlayPause,
+                                onPreviousTrack = viewModel::previousTrack,
+                                onNextTrack = viewModel::nextTrack,
+                                onSeekToMs = viewModel::seekToMs,
+                                onToggleShuffle = viewModel::toggleShuffle,
+                                onCycleRepeatMode = viewModel::cycleRepeatMode,
+                                onSelectTrack = { track -> viewModel.selectTrack(track, autoPlay = true) },
+                                onAddLocalMusic = { audioPickerLauncher.launch(arrayOf("audio/*")) },
+                                onRemoveLocalTrack = viewModel::removeImportedTrack,
+                                onFilterChange = viewModel::setLibraryFilter,
+                                onSearchQueryChange = viewModel::setSearchQuery,
+                                onOpenStudioEq = { navigateToRoute(ROUTE_STUDIO_PRESETS) },
+                                onOpenSpeakers = { navigateToRoute(ROUTE_SPEAKERS_SYNC) }
                             )
                         }
 

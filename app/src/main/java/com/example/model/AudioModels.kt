@@ -149,12 +149,36 @@ enum class SynthGroovePreset(
         subtitle = "Warm Chill Rhodes • 44.1kHz Synth",
         bpm = 104
     ),
+    ELECTRIC_EUPHORIA(
+        id = "synth_electric_euphoria",
+        title = "Electric Euphoria",
+        subtitle = "Neon Synthwave • 44.1kHz Synth",
+        bpm = 118
+    ),
+    ROOFTOP_GROOVE(
+        id = "synth_rooftop_groove",
+        title = "Rooftop Afrobeat",
+        subtitle = "Percussive Poly-Groove • 44.1kHz Synth",
+        bpm = 112
+    ),
     CALIBRATION_CLICK(
         id = "synth_calibration_click",
         title = "Sync Calibration Pulse",
         subtitle = "Precision Acoustic Alignment Click",
         bpm = 120
     )
+}
+
+enum class RepeatMode(val label: String) {
+    OFF("Repeat Off"),
+    REPEAT_ALL("Repeat All"),
+    REPEAT_ONE("Repeat One")
+}
+
+enum class MusicLibraryFilter(val label: String) {
+    ALL("All Tracks"),
+    LOCAL_MUSIC("My Music"),
+    PARTY_GROOVES("Built-in Grooves")
 }
 
 enum class TrackSourceType {
@@ -166,6 +190,7 @@ data class PartyTrack(
     val id: String,
     val title: String,
     val artist: String,
+    val album: String = "AmpSync Library",
     val bpm: Int,
     val durationMs: Long,
     val sourceType: TrackSourceType,
@@ -219,6 +244,10 @@ data class PartyUiState(
     val lowLatencyMode: Boolean = true,
     val autoPauseOnDisconnect: Boolean = true,
     val equalizerPreset: EqualizerPreset = EqualizerPreset.FLAT,
+    val isShuffleEnabled: Boolean = false,
+    val repeatMode: RepeatMode = RepeatMode.REPEAT_ALL,
+    val libraryFilter: MusicLibraryFilter = MusicLibraryFilter.ALL,
+    val searchQuery: String = "",
     val currentTrack: PartyTrack = PartyTrack(
         id = SynthGroovePreset.NEON_PULSE.id,
         title = SynthGroovePreset.NEON_PULSE.title,

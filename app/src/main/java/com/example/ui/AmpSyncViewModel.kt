@@ -14,9 +14,11 @@ import com.example.data.PartyPreferencesRepository
 import com.example.data.PersistedSettings
 import com.example.model.AudioOutputDevice
 import com.example.model.EqualizerPreset
+import com.example.model.MusicLibraryFilter
 import com.example.model.PartyPreset
 import com.example.model.PartyTrack
 import com.example.model.PartyUiState
+import com.example.model.RepeatMode
 import com.example.model.RoomZone
 import com.example.model.SavedDeviceConfig
 import com.example.model.SpeakerTransportType
@@ -30,6 +32,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.UUID
+import kotlin.random.Random
 
 class AmpSyncViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -45,18 +48,26 @@ class AmpSyncViewModel(application: Application) : AndroidViewModel(application)
             if (_uiState.value.autoPauseOnDisconnect && _uiState.value.isPlaying) {
                 pausePlayback(banner = "Audio output disconnected — paused to prevent sudden noise.")
             }
+        },
+        onTrackCompleted = {
+            viewModelScope.launch(Dispatchers.Main) {
+                handleTrackCompleted()
+            }
         }
     )
 
-    private val defaultPlaylist: List<PartyTrack> = listOf(
+    private val builtInPlaylist: List<PartyTrack> = listOf(
         SynthGroovePreset.NEON_PULSE,
         SynthGroovePreset.MIDNIGHT_BASS,
-        SynthGroovePreset.SUNSET_LOUNGE
+        SynthGroovePreset.SUNSET_LOUNGE,
+        SynthGroovePreset.ELECTRIC_EUPHORIA,
+        SynthGroovePreset.ROOFTOP_GROOVE
     ).map { preset ->
         PartyTrack(
             id = preset.id,
             title = preset.title,
             artist = preset.subtitle,
+            album = "AmpSync Synth Library",
             bpm = preset.bpm,
             durationMs = 0L,
             sourceType = TrackSourceType.SYNTH_GROOVE,
@@ -65,9 +76,12 @@ class AmpSyncViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private val _uiState = MutableStateFlow(
-        PartyUiState(playlist = defaultPlaylist, currentTrack = defaultPlaylist.first())
+        PartyUiState(playlist = builtInPlaylist, currentTrack = builtInPlaylist.first())
     )
     val uiState: StateFlow<PartyUiState> = _uiState.asStateFlow()
+
+    private val _currentAlbumArt = MutableStateFlow<ByteArray?>(null)
+    val currentAlbumArt: StateFlow<ByteArray?> = _currentAlbumArt.asStateFlow()
 
     private val soloDeviceId = MutableStateFlow<String?>(null)
     private val latestAudioDeviceMap = MutableStateFlow<Map<String, AudioDeviceInfo>>(emptyMap())
@@ -98,6 +112,7 @@ class AmpSyncViewModel(application: Application) : AndroidViewModel(application)
                 audioEngine.updateMasterVolume(settings.masterVolume, _uiState.value.isMasterMuted)
                 audioEngine.setLowLatencyMode(settings.lowLatencyMode)
                 audioEngine.setEqualizerPreset(settings.equalizerPreset)
+                audioEngine.setRepeatOne(settings.repeatMode == RepeatMode.REPEAT_ONE)
 
                 val infoMap = mutableMapOf<String, AudioDeviceInfo>()
                 val devices = mutableListOf<AudioOutputDevice>()
@@ -217,11 +232,15 @@ class AmpSyncViewModel(application: Application) : AndroidViewModel(application)
                             measuredDriftMs = currentDrift[dev.id] ?: 0f
                         )
                     }
+                    val combinedPlaylist = settings.importedTracks + builtInPlaylist
                     current.copy(
                         masterVolume = settings.masterVolume,
                         lowLatencyMode = settings.lowLatencyMode,
                         autoPauseOnDisconnect = settings.autoPauseOnDisconnect,
                         equalizerPreset = settings.equalizerPreset,
+                        isShuffleEnabled = settings.isShuffleEnabled,
+                        repeatMode = settings.repeatMode,
+                        playlist = combinedPlaylist,
                         outputDevices = enrichedDevices,
                         discoveredDevices = sys.discovered,
                         isScanning = sys.scanning,
@@ -316,17 +335,21 @@ class AmpSyncViewModel(application: Application) : AndroidViewModel(application)
         )
     }
 
-    fun selectTrack(track: PartyTrack) {
+    fun selectTrack(track: PartyTrack, autoPlay: Boolean = false) {
         viewModelScope.launch(Dispatchers.IO) {
             _uiState.update { it.copy(isLoadingTrack = true, calibrationPulseActive = false) }
             val loaded: PartyTrack? = when (track.sourceType) {
                 TrackSourceType.SYNTH_GROOVE -> {
                     val preset = track.synthPreset ?: SynthGroovePreset.NEON_PULSE
+                    _currentAlbumArt.value = null
                     audioEngine.selectSynthTrack(preset)
                 }
                 TrackSourceType.LOCAL_FILE -> {
                     val uri = track.uriString?.let { Uri.parse(it) }
-                    if (uri != null) audioEngine.loadLocalTrack(uri) else null
+                    if (uri != null) {
+                        _currentAlbumArt.value = audioEngine.loadAlbumArtBytes(uri)
+                        audioEngine.loadLocalTrack(uri)
+                    } else null
                 }
             }
             if (loaded != null) {
@@ -338,7 +361,9 @@ class AmpSyncViewModel(application: Application) : AndroidViewModel(application)
                         statusBanner = null
                     )
                 }
-                if (_uiState.value.isPlaying) {
+                if (autoPlay && !_uiState.value.isPlaying) {
+                    launch(Dispatchers.Main) { startPlayback() }
+                } else if (_uiState.value.isPlaying) {
                     PartyAudioService.updateNotification(
                         context = appContext,
                         trackTitle = loaded.title,
@@ -358,52 +383,146 @@ class AmpSyncViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun loadLocalAudioUri(uri: Uri) {
+        loadLocalAudioUris(listOf(uri))
+    }
+
+    fun loadLocalAudioUris(uris: List<Uri>) {
+        if (uris.isEmpty()) return
         viewModelScope.launch(Dispatchers.IO) {
             _uiState.update { it.copy(isLoadingTrack = true, calibrationPulseActive = false) }
-            runCatching {
-                appContext.contentResolver.takePersistableUriPermission(
-                    uri,
-                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            }
-            val loaded = audioEngine.loadLocalTrack(uri)
-            if (loaded != null) {
-                _uiState.update { state ->
-                    val updatedList = (listOf(loaded) + state.playlist.filterNot { it.id == loaded.id })
-                    state.copy(
-                        currentTrack = loaded,
-                        playlist = updatedList,
-                        isLoadingTrack = false,
-                        positionMs = 0L,
-                        statusBanner = "Loaded \"${loaded.title}\" for multi-speaker playback"
+            val extracted = uris.mapNotNull { uri ->
+                runCatching {
+                    appContext.contentResolver.takePersistableUriPermission(
+                        uri,
+                        android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
                     )
                 }
-                if (!_uiState.value.isPlaying) {
-                    startPlayback()
-                }
-            } else {
+                audioEngine.extractTrackMetadata(uri)
+            }
+            if (extracted.isEmpty()) {
                 _uiState.update {
                     it.copy(
                         isLoadingTrack = false,
-                        statusBanner = "Unable to decode selected audio file."
+                        statusBanner = "Unable to read selected audio file(s)."
                     )
                 }
+                return@launch
+            }
+
+            val existingLocal = latestSettings.importedTracks
+            val mergedLocal = (extracted + existingLocal.filterNot { prev ->
+                extracted.any { it.id == prev.id }
+            })
+            prefsRepo.saveImportedTracks(mergedLocal)
+
+            val firstTrack = extracted.first()
+            val firstUri = firstTrack.uriString?.let { Uri.parse(it) }
+            val loaded = firstUri?.let {
+                _currentAlbumArt.value = audioEngine.loadAlbumArtBytes(it)
+                audioEngine.loadLocalTrack(it)
+            } ?: firstTrack
+
+            _uiState.update { state ->
+                state.copy(
+                    currentTrack = loaded,
+                    playlist = mergedLocal + builtInPlaylist,
+                    isLoadingTrack = false,
+                    positionMs = 0L,
+                    statusBanner = if (extracted.size == 1) {
+                        "Added \"${loaded.title}\" to Music Player"
+                    } else {
+                        "Added ${extracted.size} songs to Music Player"
+                    }
+                )
+            }
+            if (!_uiState.value.isPlaying && _uiState.value.outputDevices.any { it.isConnected && it.isEnabledInParty }) {
+                launch(Dispatchers.Main) { startPlayback() }
             }
         }
     }
 
-    fun nextTrack() {
-        val list = _uiState.value.playlist
+    fun removeImportedTrack(trackId: String) {
+        val remainingLocal = latestSettings.importedTracks.filterNot { it.id == trackId }
+        viewModelScope.launch {
+            prefsRepo.saveImportedTracks(remainingLocal)
+        }
+        val wasCurrent = _uiState.value.currentTrack.id == trackId
+        val nextList = remainingLocal + builtInPlaylist
+        _uiState.update { it.copy(playlist = nextList) }
+        if (wasCurrent && nextList.isNotEmpty()) {
+            selectTrack(nextList.first())
+        }
+    }
+
+    fun toggleShuffle() {
+        val next = !_uiState.value.isShuffleEnabled
+        _uiState.update { it.copy(isShuffleEnabled = next) }
+        viewModelScope.launch { prefsRepo.saveShuffleEnabled(next) }
+    }
+
+    fun cycleRepeatMode() {
+        val next = when (_uiState.value.repeatMode) {
+            RepeatMode.REPEAT_ALL -> RepeatMode.REPEAT_ONE
+            RepeatMode.REPEAT_ONE -> RepeatMode.OFF
+            RepeatMode.OFF -> RepeatMode.REPEAT_ALL
+        }
+        audioEngine.setRepeatOne(next == RepeatMode.REPEAT_ONE)
+        _uiState.update { it.copy(repeatMode = next) }
+        viewModelScope.launch { prefsRepo.saveRepeatMode(next) }
+    }
+
+    fun setLibraryFilter(filter: MusicLibraryFilter) {
+        _uiState.update { it.copy(libraryFilter = filter) }
+    }
+
+    fun setSearchQuery(query: String) {
+        _uiState.update { it.copy(searchQuery = query) }
+    }
+
+    private fun handleTrackCompleted() {
+        val state = _uiState.value
+        val list = state.playlist
         if (list.isEmpty()) return
-        val idx = list.indexOfFirst { it.id == _uiState.value.currentTrack.id }
-        val next = list[(idx + 1) % list.size]
-        selectTrack(next)
+        val currentIdx = list.indexOfFirst { it.id == state.currentTrack.id }.coerceAtLeast(0)
+        val nextIdx = selectNextTrackIndex(
+            currentIndex = currentIdx,
+            playlistSize = list.size,
+            isShuffleEnabled = state.isShuffleEnabled,
+            repeatMode = state.repeatMode,
+            autoAdvance = true
+        )
+        if (nextIdx == null) {
+            pausePlayback()
+            audioEngine.seekToMs(0L)
+        } else {
+            selectTrack(list[nextIdx])
+        }
+    }
+
+    fun nextTrack() {
+        val state = _uiState.value
+        val list = state.playlist
+        if (list.isEmpty()) return
+        val idx = list.indexOfFirst { it.id == state.currentTrack.id }.coerceAtLeast(0)
+        val nextIdx = selectNextTrackIndex(
+            currentIndex = idx,
+            playlistSize = list.size,
+            isShuffleEnabled = state.isShuffleEnabled,
+            repeatMode = state.repeatMode,
+            autoAdvance = false
+        ) ?: ((idx + 1) % list.size)
+        selectTrack(list[nextIdx])
     }
 
     fun previousTrack() {
-        val list = _uiState.value.playlist
+        val state = _uiState.value
+        if (state.currentTrack.sourceType == TrackSourceType.LOCAL_FILE && state.positionMs > 4000L) {
+            seekToMs(0L)
+            return
+        }
+        val list = state.playlist
         if (list.isEmpty()) return
-        val idx = list.indexOfFirst { it.id == _uiState.value.currentTrack.id }
+        val idx = list.indexOfFirst { it.id == state.currentTrack.id }
         val prev = list[if (idx <= 0) list.lastIndex else idx - 1]
         selectTrack(prev)
     }
@@ -414,12 +533,13 @@ class AmpSyncViewModel(application: Application) : AndroidViewModel(application)
 
     fun toggleCalibrationPulse() {
         if (_uiState.value.calibrationPulseActive) {
-            val restore = previousTrackBeforeCalibration ?: defaultPlaylist.first()
+            val restore = previousTrackBeforeCalibration ?: builtInPlaylist.first()
             previousTrackBeforeCalibration = null
             _uiState.update { it.copy(calibrationPulseActive = false) }
             selectTrack(restore)
         } else {
             previousTrackBeforeCalibration = _uiState.value.currentTrack
+            _currentAlbumArt.value = null
             val clickTrack = audioEngine.selectSynthTrack(SynthGroovePreset.CALIBRATION_CLICK)
             _uiState.update {
                 it.copy(
@@ -700,4 +820,32 @@ class AmpSyncViewModel(application: Application) : AndroidViewModel(application)
         val rmsMap: Map<String, Float>,
         val driftMap: Map<String, Float>
     )
+
+    companion object {
+        fun selectNextTrackIndex(
+            currentIndex: Int,
+            playlistSize: Int,
+            isShuffleEnabled: Boolean,
+            repeatMode: RepeatMode,
+            autoAdvance: Boolean,
+            random: Random = Random.Default
+        ): Int? {
+            if (playlistSize <= 0) return null
+            if (playlistSize == 1) {
+                return if (!autoAdvance || repeatMode != RepeatMode.OFF) 0 else null
+            }
+            if (isShuffleEnabled) {
+                val candidates = (0 until playlistSize).filter { it != currentIndex }
+                return candidates[random.nextInt(candidates.size)]
+            }
+            val next = currentIndex + 1
+            return if (next < playlistSize) {
+                next
+            } else if (!autoAdvance || repeatMode == RepeatMode.REPEAT_ALL) {
+                0
+            } else {
+                null
+            }
+        }
+    }
 }

@@ -10,8 +10,11 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.model.EqualizerPreset
 import com.example.model.PartyPreset
+import com.example.model.PartyTrack
+import com.example.model.RepeatMode
 import com.example.model.RoomZone
 import com.example.model.SavedDeviceConfig
+import com.example.model.TrackSourceType
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
@@ -24,6 +27,9 @@ data class PersistedSettings(
     val lowLatencyMode: Boolean = true,
     val autoPauseOnDisconnect: Boolean = true,
     val equalizerPreset: EqualizerPreset = EqualizerPreset.FLAT,
+    val isShuffleEnabled: Boolean = false,
+    val repeatMode: RepeatMode = RepeatMode.REPEAT_ALL,
+    val importedTracks: List<PartyTrack> = emptyList(),
     val deviceConfigs: Map<String, SavedDeviceConfig> = emptyMap(),
     val presets: List<PartyPreset> = defaultPresets(),
     val activePresetId: String? = null
@@ -63,6 +69,9 @@ class PartyPreferencesRepository(private val context: Context) {
         val LOW_LATENCY_MODE = booleanPreferencesKey("low_latency_mode")
         val AUTO_PAUSE_ON_DISCONNECT = booleanPreferencesKey("auto_pause_on_disconnect")
         val EQUALIZER_PRESET = stringPreferencesKey("equalizer_preset")
+        val SHUFFLE_ENABLED = booleanPreferencesKey("shuffle_enabled")
+        val REPEAT_MODE = stringPreferencesKey("repeat_mode")
+        val IMPORTED_TRACKS_JSON = stringPreferencesKey("imported_tracks_json")
         val DEVICE_CONFIGS_JSON = stringPreferencesKey("device_configs_json")
         val PRESETS_JSON = stringPreferencesKey("presets_json")
         val ACTIVE_PRESET_ID = stringPreferencesKey("active_preset_id")
@@ -73,11 +82,17 @@ class PartyPreferencesRepository(private val context: Context) {
         val savedPresets = parsePresets(prefs[Keys.PRESETS_JSON])
         val eqName = prefs[Keys.EQUALIZER_PRESET]
         val eqPreset = EqualizerPreset.entries.find { it.name == eqName } ?: EqualizerPreset.FLAT
+        val repeatName = prefs[Keys.REPEAT_MODE]
+        val repeatMode = RepeatMode.entries.find { it.name == repeatName } ?: RepeatMode.REPEAT_ALL
+        val importedTracks = parseTracks(prefs[Keys.IMPORTED_TRACKS_JSON])
         PersistedSettings(
             masterVolume = prefs[Keys.MASTER_VOLUME] ?: 0.85f,
             lowLatencyMode = prefs[Keys.LOW_LATENCY_MODE] ?: true,
             autoPauseOnDisconnect = prefs[Keys.AUTO_PAUSE_ON_DISCONNECT] ?: true,
             equalizerPreset = eqPreset,
+            isShuffleEnabled = prefs[Keys.SHUFFLE_ENABLED] ?: false,
+            repeatMode = repeatMode,
+            importedTracks = importedTracks,
             deviceConfigs = configs,
             presets = savedPresets.ifEmpty { defaultPresets() },
             activePresetId = prefs[Keys.ACTIVE_PRESET_ID]
@@ -98,6 +113,18 @@ class PartyPreferencesRepository(private val context: Context) {
 
     suspend fun saveEqualizerPreset(preset: EqualizerPreset) {
         context.dataStore.edit { it[Keys.EQUALIZER_PRESET] = preset.name }
+    }
+
+    suspend fun saveShuffleEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.SHUFFLE_ENABLED] = enabled }
+    }
+
+    suspend fun saveRepeatMode(mode: RepeatMode) {
+        context.dataStore.edit { it[Keys.REPEAT_MODE] = mode.name }
+    }
+
+    suspend fun saveImportedTracks(tracks: List<PartyTrack>) {
+        context.dataStore.edit { it[Keys.IMPORTED_TRACKS_JSON] = encodeTracks(tracks) }
     }
 
     suspend fun saveDeviceConfig(config: SavedDeviceConfig) {
@@ -205,6 +232,49 @@ class PartyPreferencesRepository(private val context: Context) {
                             lowLatencyMode = obj.optBoolean("lowLatencyMode", true),
                             deviceConfigs = parseDeviceConfigs(obj.optString("deviceConfigs")),
                             equalizerPreset = eqPreset
+                        )
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun encodeTracks(tracks: List<PartyTrack>): String {
+        val arr = JSONArray()
+        tracks.forEach { track ->
+            if (track.sourceType == TrackSourceType.LOCAL_FILE && !track.uriString.isNullOrBlank()) {
+                arr.put(JSONObject().apply {
+                    put("id", track.id)
+                    put("title", track.title)
+                    put("artist", track.artist)
+                    put("album", track.album)
+                    put("bpm", track.bpm)
+                    put("durationMs", track.durationMs)
+                    put("uriString", track.uriString)
+                })
+            }
+        }
+        return arr.toString()
+    }
+
+    private fun parseTracks(raw: String?): List<PartyTrack> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return runCatching {
+            val arr = JSONArray(raw)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    val uriString = obj.optString("uriString").takeIf { it.isNotBlank() } ?: continue
+                    add(
+                        PartyTrack(
+                            id = obj.getString("id"),
+                            title = obj.optString("title", "Local Audio"),
+                            artist = obj.optString("artist", "Local Audio"),
+                            album = obj.optString("album", "Device Library"),
+                            bpm = obj.optInt("bpm", 120),
+                            durationMs = obj.optLong("durationMs", 0L),
+                            sourceType = TrackSourceType.LOCAL_FILE,
+                            uriString = uriString
                         )
                     )
                 }

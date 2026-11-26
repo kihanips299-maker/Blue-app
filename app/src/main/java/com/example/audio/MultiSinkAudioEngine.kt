@@ -46,7 +46,8 @@ private class ActiveSinkTrack(
 
 class MultiSinkAudioEngine(
     private val context: Context,
-    private val onNoisyDisconnect: () -> Unit
+    private val onNoisyDisconnect: () -> Unit,
+    private val onTrackCompleted: () -> Unit = {}
 ) {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val synthEngine = PartySynthEngine()
@@ -64,6 +65,12 @@ class MultiSinkAudioEngine(
 
     @Volatile
     private var isMasterMuted: Boolean = false
+
+    @Volatile
+    private var loopCurrentTrack: Boolean = false
+
+    @Volatile
+    private var lastCompletedTrackId: String? = null
 
     @Volatile
     private var activeTrack: PartyTrack = PartyTrack(
@@ -147,16 +154,26 @@ class MultiSinkAudioEngine(
         )
     }
 
+    fun setRepeatOne(enabled: Boolean) {
+        loopCurrentTrack = enabled
+    }
+
+    fun extractTrackMetadata(uri: Uri): PartyTrack? = localDecoder.extractTrackMetadata(uri)
+
+    fun loadAlbumArtBytes(uri: Uri): ByteArray? = localDecoder.loadAlbumArtBytes(uri)
+
     fun selectSynthTrack(preset: SynthGroovePreset): PartyTrack {
         val track = PartyTrack(
             id = preset.id,
             title = preset.title,
             artist = preset.subtitle,
+            album = "AmpSync Synth Library",
             bpm = preset.bpm,
             durationMs = 0L,
             sourceType = TrackSourceType.SYNTH_GROOVE,
             synthPreset = preset
         )
+        lastCompletedTrackId = null
         activeTrack = track
         synthEngine.reset()
         _positionMs.value = 0L
@@ -165,6 +182,7 @@ class MultiSinkAudioEngine(
 
     fun loadLocalTrack(uri: Uri): PartyTrack? {
         val decoded = localDecoder.load(uri) ?: return null
+        lastCompletedTrackId = null
         activeTrack = decoded
         _positionMs.value = 0L
         return decoded
@@ -270,9 +288,18 @@ class MultiSinkAudioEngine(
                     synthEngine.renderBlock(preset, sourcePcm, blockFrames)
                 }
                 TrackSourceType.LOCAL_FILE -> {
-                    val ok = localDecoder.readStereoBlock(sourcePcm, blockFrames)
-                    if (!ok) {
-                        synthEngine.renderBlock(SynthGroovePreset.NEON_PULSE, sourcePcm, blockFrames)
+                    when (localDecoder.readStereoBlock(sourcePcm, blockFrames, loopOnEnd = loopCurrentTrack)) {
+                        DecodeBlockResult.OK -> Unit
+                        DecodeBlockResult.END_OF_TRACK -> {
+                            sourcePcm.fill(0)
+                            if (lastCompletedTrackId != track.id) {
+                                lastCompletedTrackId = track.id
+                                onTrackCompleted()
+                            }
+                        }
+                        DecodeBlockResult.ERROR -> {
+                            sourcePcm.fill(0)
+                        }
                     }
                 }
             }

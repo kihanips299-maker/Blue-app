@@ -120,4 +120,38 @@ class ExampleUnitTest {
         assertTrue(partyCurve.first() > 2.5f)
         assertTrue(acousticCurve[acousticCurve.size / 2] > 1.5f)
     }
+
+    @Test
+    fun musicPlayerQueue_handlesRepeatAndShuffleCorrectly() {
+        // Repeat All wraps from last track back to 0
+        val wrapIdx = com.example.ui.AmpSyncViewModel.selectNextTrackIndex(
+            currentIndex = 4,
+            playlistSize = 5,
+            isShuffleEnabled = false,
+            repeatMode = com.example.model.RepeatMode.REPEAT_ALL,
+            autoAdvance = true
+        )
+        assertEquals(0, wrapIdx)
+
+        // Repeat Off stops at end of queue during auto-advance
+        val stopIdx = com.example.ui.AmpSyncViewModel.selectNextTrackIndex(
+            currentIndex = 4,
+            playlistSize = 5,
+            isShuffleEnabled = false,
+            repeatMode = com.example.model.RepeatMode.OFF,
+            autoAdvance = true
+        )
+        assertEquals(null, stopIdx)
+
+        // Shuffle selects a different track when playlist has multiple tracks
+        val shuffledIdx = com.example.ui.AmpSyncViewModel.selectNextTrackIndex(
+            currentIndex = 2,
+            playlistSize = 5,
+            isShuffleEnabled = true,
+            repeatMode = com.example.model.RepeatMode.REPEAT_ALL,
+            autoAdvance = true,
+            random = kotlin.random.Random(42)
+        )
+        assertTrue(shuffledIdx != null && shuffledIdx != 2 && shuffledIdx in 0..4)
+    }
 }
