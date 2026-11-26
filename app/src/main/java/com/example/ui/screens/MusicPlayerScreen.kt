@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Search
@@ -111,6 +112,8 @@ fun MusicPlayerScreen(
     onToggleShuffle: () -> Unit,
     onCycleRepeatMode: () -> Unit,
     onSelectTrack: (PartyTrack) -> Unit,
+    onRequestMusicPermission: () -> Unit,
+    onRescanDeviceMusic: () -> Unit,
     onAddLocalMusic: () -> Unit,
     onRemoveLocalTrack: (String) -> Unit,
     onFilterChange: (MusicLibraryFilter) -> Unit,
@@ -159,6 +162,74 @@ fun MusicPlayerScreen(
             )
         }
 
+        // 1b. Auto-Detect Phone Music Permission Card (if not granted yet)
+        if (!state.hasMusicPermission) {
+            item {
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = ElectricCyan.copy(alpha = 0.08f),
+                    border = BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.45f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("auto_scan_permission_card")
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.LibraryMusic,
+                                contentDescription = null,
+                                tint = ElectricCyan,
+                                modifier = Modifier.size(26.dp)
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Auto-Detect Phone Music",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = TextPrimary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Automatically find all MP3, FLAC, WAV & AAC songs on your phone and add them to your playlist.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Button(
+                                onClick = onRequestMusicPermission,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = ElectricCyan,
+                                    contentColor = ObsidianBg
+                                ),
+                                modifier = Modifier
+                                    .defaultMinSize(minHeight = 48.dp)
+                                    .testTag("grant_music_permission_button")
+                            ) {
+                                Text("Scan Phone Music")
+                            }
+                            OutlinedButton(
+                                onClick = onAddLocalMusic,
+                                border = BorderStroke(1.dp, BorderSubtle),
+                                modifier = Modifier.defaultMinSize(minHeight = 48.dp)
+                            ) {
+                                Text("Pick Manually", color = TextPrimary)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // 2. Music Library & Queue Controls Header
         item {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -167,36 +238,68 @@ fun MusicPlayerScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "MUSIC LIBRARY & QUEUE",
                             style = MaterialTheme.typography.labelMedium,
                             color = ElectricCyan
                         )
+                        val phoneCount = state.playlist.count { it.sourceType == TrackSourceType.LOCAL_FILE }
                         Text(
-                            text = "${state.playlist.size} tracks ready",
+                            text = when {
+                                state.isScanningLibrary -> "Scanning phone for music files..."
+                                phoneCount > 0 -> "$phoneCount phone song${if (phoneCount == 1) "" else "s"} • ${state.playlist.size} total"
+                                else -> "${state.playlist.size} tracks ready"
+                            },
                             style = MaterialTheme.typography.titleMedium,
                             color = TextPrimary
                         )
                     }
 
-                    Button(
-                        onClick = onAddLocalMusic,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = ElectricCyan,
-                            contentColor = ObsidianBg
-                        ),
-                        modifier = Modifier
-                            .defaultMinSize(minHeight = 48.dp)
-                            .testTag("add_music_button")
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Add,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text(stringResource(R.string.action_pick_audio))
+                        if (state.hasMusicPermission) {
+                            IconButton(
+                                onClick = onRescanDeviceMusic,
+                                enabled = !state.isScanningLibrary,
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .testTag("rescan_music_button")
+                            ) {
+                                if (state.isScanningLibrary) {
+                                    CircularProgressIndicator(
+                                        color = ElectricCyan,
+                                        modifier = Modifier.size(20.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Refresh,
+                                        contentDescription = "Rescan phone music",
+                                        tint = ElectricCyan
+                                    )
+                                }
+                            }
+                        }
+
+                        OutlinedButton(
+                            onClick = onAddLocalMusic,
+                            border = BorderStroke(1.dp, BorderSubtle),
+                            modifier = Modifier
+                                .defaultMinSize(minHeight = 48.dp)
+                                .testTag("add_music_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Add,
+                                contentDescription = null,
+                                tint = ElectricCyan,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(stringResource(R.string.action_pick_audio), color = TextPrimary)
+                        }
                     }
                 }
 
@@ -333,7 +436,7 @@ fun MusicPlayerScreen(
                     isCurrent = isCurrent,
                     isPlaying = isCurrent && state.isPlaying,
                     onClick = { onSelectTrack(track) },
-                    onRemove = if (track.sourceType == TrackSourceType.LOCAL_FILE) {
+                    onRemove = if (track.sourceType == TrackSourceType.LOCAL_FILE && !track.isAutoScanned) {
                         { onRemoveLocalTrack(track.id) }
                     } else null
                 )

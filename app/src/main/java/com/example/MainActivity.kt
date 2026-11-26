@@ -57,7 +57,11 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -75,6 +79,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.example.audio.DeviceMusicScanner
 import com.example.ui.AmpSyncViewModel
 import com.example.ui.components.SyncStatusPill
 import com.example.ui.screens.BluetoothDiscoveryScreen
@@ -183,6 +188,25 @@ fun AmpSyncApp(viewModel: AmpSyncViewModel = viewModel()) {
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { /* playback works even if notifications are declined */ }
+
+    val musicPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        viewModel.onMusicPermissionResult(granted)
+    }
+
+    var askedMusicPermissionOnPlayerTab by rememberSaveable { mutableStateOf(false) }
+
+    val requestMusicLibraryPermission: () -> Unit = {
+        musicPermissionLauncher.launch(DeviceMusicScanner.requiredAudioPermission())
+    }
+
+    LaunchedEffect(currentRoute, state.hasMusicPermission) {
+        if (currentRoute == ROUTE_MUSIC_PLAYER && !state.hasMusicPermission && !askedMusicPermissionOnPlayerTab) {
+            askedMusicPermissionOnPlayerTab = true
+            requestMusicLibraryPermission()
+        }
+    }
 
     val audioPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
@@ -373,6 +397,8 @@ fun AmpSyncApp(viewModel: AmpSyncViewModel = viewModel()) {
                                 onToggleShuffle = viewModel::toggleShuffle,
                                 onCycleRepeatMode = viewModel::cycleRepeatMode,
                                 onSelectTrack = { track -> viewModel.selectTrack(track, autoPlay = true) },
+                                onRequestMusicPermission = requestMusicLibraryPermission,
+                                onRescanDeviceMusic = { viewModel.scanDeviceMusic(showResultBanner = true) },
                                 onAddLocalMusic = { audioPickerLauncher.launch(arrayOf("audio/*")) },
                                 onRemoveLocalTrack = viewModel::removeImportedTrack,
                                 onFilterChange = viewModel::setLibraryFilter,

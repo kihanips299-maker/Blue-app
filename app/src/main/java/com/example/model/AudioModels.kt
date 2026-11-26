@@ -177,7 +177,7 @@ enum class RepeatMode(val label: String) {
 
 enum class MusicLibraryFilter(val label: String) {
     ALL("All Tracks"),
-    LOCAL_MUSIC("My Music"),
+    LOCAL_MUSIC("Phone Music"),
     PARTY_GROOVES("Built-in Grooves")
 }
 
@@ -195,7 +195,8 @@ data class PartyTrack(
     val durationMs: Long,
     val sourceType: TrackSourceType,
     val uriString: String? = null,
-    val synthPreset: SynthGroovePreset? = null
+    val synthPreset: SynthGroovePreset? = null,
+    val isAutoScanned: Boolean = false
 )
 
 data class SavedDeviceConfig(
@@ -263,6 +264,8 @@ data class PartyUiState(
     val discoveredDevices: List<DiscoveredBluetoothDevice> = emptyList(),
     val discoveryAudioOnlyFilter: Boolean = true,
     val isScanning: Boolean = false,
+    val hasMusicPermission: Boolean = false,
+    val isScanningLibrary: Boolean = false,
     val bluetoothCapabilities: BluetoothCapabilities = BluetoothCapabilities(),
     val diagnostics: EngineDiagnostics = EngineDiagnostics(),
     val presets: List<PartyPreset> = emptyList(),

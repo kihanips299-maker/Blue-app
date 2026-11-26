@@ -265,7 +265,7 @@ class LocalAudioDecoder(private val context: Context) {
     }
 
     fun loadAlbumArtBytes(uri: Uri): ByteArray? {
-        return runCatching {
+        val embedded = runCatching {
             val retriever = MediaMetadataRetriever()
             try {
                 retriever.setDataSource(context, uri)
@@ -274,6 +274,18 @@ class LocalAudioDecoder(private val context: Context) {
                 runCatching { retriever.release() }
             }
         }.getOrNull()
+        if (embedded != null) return embedded
+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            return runCatching {
+                val bmp = context.contentResolver.loadThumbnail(uri, android.util.Size(320, 320), null)
+                val out = java.io.ByteArrayOutputStream()
+                bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
+                bmp.recycle()
+                out.toByteArray()
+            }.getOrNull()
+        }
+        return null
     }
 
     fun load(uri: Uri): PartyTrack? {

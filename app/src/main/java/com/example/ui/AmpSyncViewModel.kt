@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.audio.DeviceMusicScanner
 import com.example.audio.MultiSinkAudioEngine
 import com.example.audio.PartyAudioService
 import com.example.audio.SinkRoutingTarget
@@ -83,12 +84,24 @@ class AmpSyncViewModel(application: Application) : AndroidViewModel(application)
     private val _currentAlbumArt = MutableStateFlow<ByteArray?>(null)
     val currentAlbumArt: StateFlow<ByteArray?> = _currentAlbumArt.asStateFlow()
 
+    private val scannedDeviceTracks = MutableStateFlow<List<PartyTrack>>(emptyList())
     private val soloDeviceId = MutableStateFlow<String?>(null)
     private val latestAudioDeviceMap = MutableStateFlow<Map<String, AudioDeviceInfo>>(emptyMap())
     private var latestSettings = PersistedSettings()
 
+    private val deviceMusicScanner = DeviceMusicScanner(
+        context = appContext,
+        onMediaStoreChanged = { scanDeviceMusic(showResultBanner = false) }
+    )
+
     init {
         bluetoothMonitor.start()
+        val hasAudioPerm = deviceMusicScanner.hasAudioLibraryPermission()
+        _uiState.update { it.copy(hasMusicPermission = hasAudioPerm) }
+        if (hasAudioPerm) {
+            deviceMusicScanner.startObserving()
+            scanDeviceMusic(showResultBanner = false)
+        }
         observeSystemAndSettings()
         observeEngineTelemetry()
     }
@@ -232,7 +245,10 @@ class AmpSyncViewModel(application: Application) : AndroidViewModel(application)
                             measuredDriftMs = currentDrift[dev.id] ?: 0f
                         )
                     }
-                    val combinedPlaylist = settings.importedTracks + builtInPlaylist
+                    val combinedPlaylist = buildCombinedPlaylist(
+                        scanned = scannedDeviceTracks.value,
+                        imported = settings.importedTracks
+                    )
                     current.copy(
                         masterVolume = settings.masterVolume,
                         lowLatencyMode = settings.lowLatencyMode,
@@ -240,6 +256,7 @@ class AmpSyncViewModel(application: Application) : AndroidViewModel(application)
                         equalizerPreset = settings.equalizerPreset,
                         isShuffleEnabled = settings.isShuffleEnabled,
                         repeatMode = settings.repeatMode,
+                        hasMusicPermission = deviceMusicScanner.hasAudioLibraryPermission(),
                         playlist = combinedPlaylist,
                         outputDevices = enrichedDevices,
                         discoveredDevices = sys.discovered,
@@ -249,6 +266,61 @@ class AmpSyncViewModel(application: Application) : AndroidViewModel(application)
                         activePresetId = settings.activePresetId
                     )
                 }
+            }
+        }
+    }
+
+    private fun buildCombinedPlaylist(
+        scanned: List<PartyTrack>,
+        imported: List<PartyTrack>
+    ): List<PartyTrack> {
+        val seenKeys = HashSet<String>()
+        val localCombined = buildList {
+            (scanned + imported).forEach { track ->
+                val dedupeKey = "${track.title.lowercase()}_${track.durationMs / 1000L}"
+                if (seenKeys.add(dedupeKey)) {
+                    add(track)
+                }
+            }
+        }
+        return localCombined + builtInPlaylist
+    }
+
+    fun onMusicPermissionResult(granted: Boolean) {
+        _uiState.update { it.copy(hasMusicPermission = granted) }
+        if (granted) {
+            deviceMusicScanner.startObserving()
+            scanDeviceMusic(showResultBanner = true)
+        } else {
+            _uiState.update {
+                it.copy(statusBanner = "Music library permission denied — you can still pick songs manually via Add Songs.")
+            }
+        }
+    }
+
+    fun scanDeviceMusic(showResultBanner: Boolean = true) {
+        if (!deviceMusicScanner.hasAudioLibraryPermission()) {
+            _uiState.update { it.copy(hasMusicPermission = false) }
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.update { it.copy(hasMusicPermission = true, isScanningLibrary = true) }
+            val detected = deviceMusicScanner.scanAllAudioTracks()
+            scannedDeviceTracks.value = detected
+            val combined = buildCombinedPlaylist(
+                scanned = detected,
+                imported = latestSettings.importedTracks
+            )
+            _uiState.update { state ->
+                val shouldBanner = showResultBanner
+                state.copy(
+                    playlist = combined,
+                    isScanningLibrary = false,
+                    statusBanner = if (shouldBanner) {
+                        if (detected.isEmpty()) "No local audio files found on this device."
+                        else "Detected ${detected.size} song${if (detected.size == 1) "" else "s"} on your phone"
+                    } else state.statusBanner
+                )
             }
         }
     }
@@ -425,7 +497,7 @@ class AmpSyncViewModel(application: Application) : AndroidViewModel(application)
             _uiState.update { state ->
                 state.copy(
                     currentTrack = loaded,
-                    playlist = mergedLocal + builtInPlaylist,
+                    playlist = buildCombinedPlaylist(scannedDeviceTracks.value, mergedLocal),
                     isLoadingTrack = false,
                     positionMs = 0L,
                     statusBanner = if (extracted.size == 1) {
@@ -447,7 +519,7 @@ class AmpSyncViewModel(application: Application) : AndroidViewModel(application)
             prefsRepo.saveImportedTracks(remainingLocal)
         }
         val wasCurrent = _uiState.value.currentTrack.id == trackId
-        val nextList = remainingLocal + builtInPlaylist
+        val nextList = buildCombinedPlaylist(scannedDeviceTracks.value, remainingLocal)
         _uiState.update { it.copy(playlist = nextList) }
         if (wasCurrent && nextList.isNotEmpty()) {
             selectTrack(nextList.first())
@@ -802,6 +874,7 @@ class AmpSyncViewModel(application: Application) : AndroidViewModel(application)
 
     override fun onCleared() {
         super.onCleared()
+        deviceMusicScanner.stopObserving()
         bluetoothMonitor.stop()
         audioEngine.release()
     }
